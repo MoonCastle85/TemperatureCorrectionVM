@@ -1,0 +1,12 @@
+name: TemperatureCorrectionVM
+title: TemperatureCorrectionVM
+username: greenmanxy
+account: greenmanxy
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 12406858
+bundleId: 8945251
+url: https://greenmanxy.shinyapps.io/TemperatureCorrectionVM/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

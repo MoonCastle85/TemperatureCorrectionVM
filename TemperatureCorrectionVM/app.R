@@ -9,9 +9,8 @@ library(shinyjs)
 
 theme_set(ggthemes::theme_clean(base_size = 24))
 
-normal_temp <- read_csv2(paste0("F:/Profu/Fjärrkontrollen - Profu - Documents/Admin/",
-                                "3. Underlag profiler, COP, inv kostnader osv/Profiler värme och el för fastigheterna/",
-                                "Normaltemperaturer.csv"), col_types = "cnnnnnn")
+normal_temp <- read_csv2("https://manborgconsulting.com/Normaltemperaturer.csv", 
+                         col_types = "cnnnnnn")
 
 # Define UI for application that draws a histogram
 my_ui <- fluidPage(
