@@ -15,10 +15,7 @@ library(dlookr)
 library(plotly)
 
 tidymodels_prefer()
-
 theme_set(ggthemes::theme_clean(base_size = 24))
-
-normal_temp <- read_csv2("https://manborgconsulting.com/Normaltemperaturer.csv", col_types = "cnnnnnn")
 
 # Define UI for application that draws a histogram
 my_ui <- fluidPage(
@@ -41,17 +38,15 @@ my_ui <- fluidPage(
                          choiceNames = list(
                            HTML(paste0("K-Nearest Neighbour <a href='https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm'",
                                        "target='_blank'>Wiki</a>")),
-                           HTML(paste0("Articifial Neural Network <a href='https://en.wikipedia.org/wiki/Neural_network_(machine_learning)'",
-                                       "target='_blank'>Wiki</a>")),
                            HTML(paste0("Random Forest <a href='https://en.wikipedia.org/wiki/Random_forest'",
                                        "target='_blank'>Wiki</a>"))),
-                         choiceValues = list("my_knn", "my_ann", "my_rf")),
-            selectInput(inputId = "municipalities",
-                        label = "Select municipality for normal temperatures",
-                        choices = distinct(normal_temp, Ort) %>% pull(Ort),
-                        selected = NULL), 
-            fileInput("my_file", "Select a CSV file that must have these columns: Month (1-12), Hour (0-23), Temperature (°C) and 
-                      Load (kW or MW)", accept = ".csv"),
+                         choiceValues = list("my_knn", "my_rf")),
+            fileInput("normal_file",
+                      "Select a CSV containing independent calendar variables (monts, days, hours...) and normal temperature",
+                      accept = ".csv"),
+            fileInput("my_file",
+                      "Select a CSV containing independent calendar variables. It must contain the variables: 'temperature' and 'load'",
+                      accept = ".csv"),
             numericInput("my_neighbours", "Select number of neighbours for the KNN model", 2, min = 2, max = 20, step = 1),
             numericInput("my_trees", "Select number of trees for the RF model", 300, min = 100, max = 1000, step = 100),
             sliderInput("pointsize", "Adjust the size of the points in the graphs", min = 1, max = 5, value = 1, step = 1),
@@ -90,48 +85,43 @@ my_server <- function(input, output, session) {
   reactive_ursprungsprofil <- reactive({
       my_file <- input$my_file
       req(my_file)
-      result <- read_csv2(my_file$datapath, col_types = "nnnn", 
-                                   col_names = c("Month", "Hour", "Temperature", "Load"), skip = 1) %>%
-        mutate(Season = case_when(Month %in% c(1,2,12) ~ "Winter",
-                                  Month %in% c(3,4,5) ~ "Spring",
-                                  Month %in% c(9,10,11) ~ "Autumn",
-                                  Month %in% c(6,7,8) ~ "Summer"))
+      result <- read_csv2(my_file$datapath, col_types = "n")
       
       return(result)
   })
   
   reactive_profile_no_outliers <- reactive({
     reactive_ursprungsprofil() %>%
-      mutate(Temperature_bin = binning(Temperature, nbins = 20, type = "quantile")) %>%
-      remove_outliers(., "Temperature_bin", "Load")
+      # mutate(temperature_bin = binning(temperature, nbins = 20, type = "quantile")) %>%
+      remove_outliers(., "temperature_bin", "load")
   })
   
   reactive_selected_temp <- reactive({
-    dplyr::filter(normal_temp, Ort == input$municipalities) %>%
-    mutate(Season = case_when(Month %in% c(1,2,12) ~ "Winter",
-                              Month %in% c(3,4,5) ~ "Spring",
-                              Month %in% c(9,10,11) ~ "Autumn",
-                              Month %in% c(6,7,8) ~ "Summer"))
+    my_file2 <- input$normal_file
+    req(my_file2)
+    result2 <- read_csv2(my_file2$datapath, col_types = "n")
+    
+    return(result2)
   })
   
   my_recipes <- reactive({
-    recipe(Load ~ Month + Temperature + Hour, data = reactive_profile_no_outliers()) %>%
-     step_normalize(Temperature, id = "temp_normalize") %>%
-     step_normalize(Load, skip = TRUE, id = "load_normalize")
+    recipe(load ~ ., data = reactive_profile_no_outliers()) %>%
+      step_normalize(temperature, id = "temp_normalize") %>%
+      step_normalize(load, skip = TRUE, id = "load_normalize")
   })
   
-  unnormalize <- function(pred) {
-    tidy_rec <- my_recipes %>%
-      prep() %>%
-      tidy(., id = "load_normalize")
-    
-    sd <- filter(tidy_rec, statistic == "sd") %>% pull(value)
-    means <- filter(tidy_rec, statistic == "mean") %>% pull(value)
-    
-    unnormalized_pred <- pred * sd + means
-    
-    return(unnormalized_pred)
-  }
+  # unnormalize <- function(pred) {
+  #   tidy_rec <- my_recipes %>%
+  #     prep() %>%
+  #     tidy(., id = "load_normalize")
+  #   
+  #   sd <- filter(tidy_rec, statistic == "sd") %>% pull(value)
+  #   means <- filter(tidy_rec, statistic == "mean") %>% pull(value)
+  #   
+  #   unnormalized_pred <- pred * sd + means
+  #   
+  #   return(unnormalized_pred)
+  # }
   
   knn_spec_triang <- reactive({
     nearest_neighbor(weight_func = "triangular", neighbors = input$my_neighbours) %>% 
@@ -159,33 +149,33 @@ my_server <- function(input, output, session) {
   
   knn_result <- reactive({
     knn_pred <- predict(fit_all()[[1]], new_data = reactive_selected_temp())
-    result_knn <- bind_cols(reactive_selected_temp() %>% select(Ort, Temperature), Predikterat = round(knn_pred, 1))
+    result_knn <- bind_cols(reactive_selected_temp(), predikterat = round(knn_pred, 1))
     
     return(result_knn)
   })
 
   rf_result <- reactive({
     rf_pred <- predict(fit_all()[[2]], new_data = reactive_selected_temp())
-    result_rf <- bind_cols(reactive_selected_temp() %>% select(Ort, Temperature), Predikterat = round(rf_pred, 1))
+    result_rf <- bind_cols(reactive_selected_temp(), predikterat = round(rf_pred, 1))
     
     return(result_rf)
   })
   
   orig_data <- reactive({
     reactive_ursprungsprofil() %>%
-      rename(Original_temperature = Temperature, Original_load = Load)
+      rename(original_temperature = temperature, original_load = load)
   })
   
   final_knn <- reactive({
     bind_cols(orig_data(), knn_result()) %>%
-    dplyr::select(Ort, Month, Hour, Original_temperature, Original_load, Temperature, .pred) %>%
-    rename(Temperature_normal = Temperature, Predicted_normal_load_using_knn = .pred)
+    dplyr::select(original_temperature, original_load, temperature, .pred) %>%
+    rename(temperature_normal = temperature, predicted_knn_load = .pred)
   })
-  
+
   final_rf <- reactive({
       bind_cols(orig_data(), rf_result()) %>%
-      dplyr::select(Ort, Month, Hour, Original_temperature, Original_load, Temperature, .pred) %>%
-      rename(Predicted_normal_load_using_rf = .pred)
+      dplyr::select(original_temperature, original_load, temperature, .pred) %>%
+      rename(predicted_rf_load = .pred)
   })
 
   selected_algorithm_data <- reactive({
@@ -199,9 +189,9 @@ my_server <- function(input, output, session) {
   output$mainPlot <- renderPlotly({
       g1 = ggplot() +
           geom_point(data = reactive_ursprungsprofil(), 
-                     mapping = aes(x = Temperature, y = Load, colour = "Original"), size = input$pointsize) +
+                     mapping = aes(x = temperature, y = load, colour = "Original"), size = input$pointsize) +
           geom_point(data = selected_algorithm_data(), 
-                     mapping = aes(x = Temperature, y = .pred, colour = "Predicted"), size = input$pointsize, shape = 21) +
+                     mapping = aes(x = temperature, y = .pred, colour = "Predicted"), size = input$pointsize, shape = 21) +
           labs(title = "Load vs temperature data", x = "Outdoor temperature (°C)", y = "Heating load (kW)") +
           scale_colour_manual(values = c("Original" = "blue", "Predicted" = "red"), labels = c("Original", "Predicted"),
                               name = "Data source") +
@@ -213,24 +203,24 @@ my_server <- function(input, output, session) {
   
   output$secondaryPlot <- renderPlotly({
     g2 = ggplot() +
-      geom_point(data = reactive_ursprungsprofil(), 
-                 mapping = aes(x = seq(1,length(reactive_ursprungsprofil()$Month),1), y = Load, colour = "Original"), 
+      geom_point(data = reactive_ursprungsprofil(),
+                 mapping = aes(x = seq(1,length(reactive_ursprungsprofil()$temperature),1), y = load, colour = "Original"),
                  size = input$pointsize) +
-      geom_point(data = selected_algorithm_data(), 
-                 mapping = aes(x = seq(1,8760,1), y = .pred, colour = "Predicted"), 
+      geom_point(data = selected_algorithm_data(),
+                 mapping = aes(x = seq(1,8760,1), y = .pred, colour = "Predicted"),
                  size = input$pointsize, shape = 21) +
       labs(title = "Load vs temperature data", x = "Hour of the year", y = "Heating load (kW or MW)") +
       scale_colour_manual(values = c("Original" = "blue", "Predicted" = "red"), labels = c("Original", "Predicted"),
                           name = "Data source") +
       scale_x_continuous(n.breaks = 12) +
       scale_y_continuous(n.breaks = 10)
-    
+
     ggplotly(g2)
   })
   
   output$my_DT <- DT::renderDT({
       datatable(selected_table_data(),
-                options = list(initComplete = JS("function(settings, json) {", 
+                options = list(initComplete = JS("function(settings, json) {",
                                                  "  Shiny.setInputValue('table_rendered', true);", "}")
                 )
       )
