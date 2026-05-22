@@ -1,5 +1,5 @@
 get_knn_model <- function(data) {
-  rec_resid <- recipe(resid ~ temperature + time + hour, data = data) %>%
+  rec_resid <- recipe(resid ~ temperature + is_weekend + time + hour, data = data) %>%
     step_mutate(hour_sin = sin(2 * pi * time/24),
                 hour_cos = cos(2 * pi * time/24)) %>%
     step_normalize(temperature) %>%
