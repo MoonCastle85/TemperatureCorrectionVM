@@ -7,36 +7,49 @@ get_prediction_mode_label <- function(prediction_mode, target_max_load = 63) {
   )
 }
 
-apply_prediction_mode <- function(predictions, prediction_mode = "standard", target_max_load = 63) {
+apply_prediction_mode <- function(
+  predictions,
+  prediction_mode = "standard",
+  target_max_load = 63,
+  stop_temp_c = 15
+) {
   if (prediction_mode == "standard") {
     return(predictions)
   }
 
   if (prediction_mode == "strict_fixed_peak_63") {
-    return(apply_strict_fixed_peak_mode(predictions, target_max_load = target_max_load))
+    return(
+      apply_strict_fixed_peak_mode(
+        predictions,
+        target_max_load = target_max_load,
+        stop_temp_c = stop_temp_c
+      )
+    )
   }
 
   stop(paste0("Unknown prediction_mode: ", prediction_mode), call. = FALSE)
 }
 
-apply_strict_fixed_peak_mode <- function(predictions, target_max_load = 63) {
+apply_strict_fixed_peak_mode <- function(predictions, target_max_load = 63, stop_temp_c = 15) {
   predictions %>%
     group_split(profile_id, .keep = TRUE) %>%
     map(\(profile_predictions) {
       adjust_profile_to_fixed_peak(
         profile_predictions,
-        target_max_load = target_max_load
+        target_max_load = target_max_load,
+        stop_temp_c = stop_temp_c
       )
     }) %>%
     list_rbind() %>%
     arrange(year, source_file, hour)
 }
 
-adjust_profile_to_fixed_peak <- function(profile_predictions, target_max_load = 63) {
+adjust_profile_to_fixed_peak <- function(profile_predictions, target_max_load = 63, stop_temp_c = 15) {
   profile_predictions <- profile_predictions %>%
     arrange(hour)
 
   heating_rows <- profile_predictions$season == "heating" & !is.na(profile_predictions$pred_load_new)
+  summer_rows <- profile_predictions$season == "summer" & !is.na(profile_predictions$pred_load_new)
 
   if (!any(heating_rows)) {
     profile_predictions$pred_load_new <- pmin(profile_predictions$pred_load_new, target_max_load)
@@ -68,6 +81,26 @@ adjust_profile_to_fixed_peak <- function(profile_predictions, target_max_load = 
   }
 
   profile_predictions$pred_load_new[heating_rows] <- adjusted_heating
+
+  transition_rows <- heating_rows &
+    profile_predictions$temperature >= (stop_temp_c - 1) &
+    profile_predictions$temperature < stop_temp_c
+
+  transition_cap <- max(profile_predictions$pred_load_new[transition_rows], na.rm = TRUE)
+
+  if (!is.finite(transition_cap)) {
+    warmest_adjusted_rows <- heating_rows &
+      profile_predictions$temperature == warmest_heating_temp
+    transition_cap <- max(profile_predictions$pred_load_new[warmest_adjusted_rows], na.rm = TRUE)
+  }
+
+  if (is.finite(transition_cap) && any(summer_rows)) {
+    profile_predictions$pred_load_new[summer_rows] <- pmin(
+      profile_predictions$pred_load_new[summer_rows],
+      transition_cap
+    )
+  }
+
   profile_predictions$pred_load_new <- pmax(profile_predictions$pred_load_new, 0)
   profile_predictions$pred_load_new <- pmin(profile_predictions$pred_load_new, target_max_load)
 

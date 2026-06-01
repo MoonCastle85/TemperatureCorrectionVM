@@ -209,7 +209,8 @@ predict_temperature_profile <- function(
   apply_prediction_mode(
     combined_prediction,
     prediction_mode = prediction_mode,
-    target_max_load = target_max_load
+    target_max_load = target_max_load,
+    stop_temp_c = stop_temp_c
   )
 }
 
