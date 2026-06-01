@@ -12,6 +12,8 @@ orig_profile_path <- "C:/Users/vanja/OneDrive - Profu/Umeå Energi - Documents/F
 temp_folder_path <- "./Temperatures for prediction"
 output_path <- "Outputs/Varmeprofiler_GBG_2015-2025.csv"
 stop_temp_c <- 15
+prediction_mode <- "standard"
+target_max_load <- 63
 
 assert_required_columns <- function(data, required_cols, label) {
   missing_cols <- setdiff(required_cols, names(data))
@@ -174,7 +176,14 @@ empty_prediction <- function(template) {
     mutate(pred_load_new = numeric())
 }
 
-predict_temperature_profile <- function(temp_profile, orig_profile, model_fits, stop_temp_c = 15) {
+predict_temperature_profile <- function(
+  temp_profile,
+  orig_profile,
+  model_fits,
+  stop_temp_c = 15,
+  prediction_mode = "standard",
+  target_max_load = 63
+) {
   heating_input <- temp_profile %>%
     filter(temperature < stop_temp_c)
 
@@ -193,9 +202,15 @@ predict_temperature_profile <- function(temp_profile, orig_profile, model_fits, 
     empty_prediction(temp_profile)
   }
 
-  bind_rows(heating_prediction, summer_prediction) %>%
+  combined_prediction <- bind_rows(heating_prediction, summer_prediction) %>%
     arrange(hour) %>%
     mutate(season = if_else(temperature < stop_temp_c, "heating", "summer"))
+
+  apply_prediction_mode(
+    combined_prediction,
+    prediction_mode = prediction_mode,
+    target_max_load = target_max_load
+  )
 }
 
 orig_profile <- read_standard_profile(orig_profile_path) %>%
@@ -215,7 +230,9 @@ all_predictions <- temp_profiles %>%
       temp_profile = temp_profile,
       orig_profile = orig_profile,
       model_fits = model_fits,
-      stop_temp_c = stop_temp_c
+      stop_temp_c = stop_temp_c,
+      prediction_mode = prediction_mode,
+      target_max_load = target_max_load
     )
   }) %>%
   list_rbind() %>%
