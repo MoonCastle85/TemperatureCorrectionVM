@@ -251,8 +251,6 @@ my_ui <- fluidPage(
     $(document).on('shiny:connected', function() {
       var input = document.getElementById('temp_files');
       if (input) {
-        input.setAttribute('webkitdirectory', '');
-        input.setAttribute('directory', '');
         input.setAttribute('multiple', '');
       }
     });
@@ -266,11 +264,11 @@ my_ui <- fluidPage(
         "Heating profile CSV",
         accept = ".csv"
       ),
-      helpText("Browse to a folder and select it. All CSV files in that folder will be uploaded."),
+      helpText("Select one temperature CSV file or multiple CSV files."),
       helpText("Required temperature file columns: year, month, weekday, day, time, hour, temperature"),
       fileInput(
         "temp_files",
-        "Temperature CSV folder",
+        "Temperature CSV file(s)",
         multiple = TRUE,
         accept = ".csv"
       ),
