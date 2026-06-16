@@ -221,7 +221,11 @@ predict_temperature_profile <- function(
   }
 
   summer_prediction <- if (nrow(summer_input) > 0) {
-    get_pred_load_summer(data = orig_profile, new = summer_input)
+    get_pred_load_summer(
+      data = orig_profile,
+      new = summer_input,
+      stop_temp_c = stop_temp_c
+    )
   } else {
     empty_prediction(temp_profile)
   }
