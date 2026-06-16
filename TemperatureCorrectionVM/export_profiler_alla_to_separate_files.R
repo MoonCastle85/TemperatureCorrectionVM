@@ -27,9 +27,17 @@ output_dir <- "C:/Git/TemperatureCorrectionVM/Outputs"
 # - hour/Timme plus a column named "value"
 # - hour/Timme plus a column with the exact output column name
 
-elprofiler <- read_csv2(paste0("C:/Users/vanja/OneDrive - Profu/Fjärrkontrollen - Profu - Documents/Admin/",
-                               "3. Underlag profiler, COP, inv kostnader osv/Profiler värme och el för fastigheterna/",
-                               "Analys profiler/elprofiler_alla.csv"))
+elprofiler <- suppressMessages(
+  read_csv2(
+    paste0(
+      "C:/Users/vanja/OneDrive - Profu/Fjärrkontrollen - Profu - Documents/Admin/",
+      "3. Underlag profiler, COP, inv kostnader osv/Profiler värme och el för fastigheterna/",
+      "Analys profiler/elprofiler_alla.csv"
+    ),
+    show_col_types = FALSE,
+    progress = FALSE
+  )
+)
 
 el_aldre_flerbostadshus_source <- elprofiler$`elprofil_foretag aldre_flerbostadshus`
 el_aldre_villa_source <- elprofiler$`elprofil_privat aldre_villa`
@@ -39,12 +47,12 @@ el_ny_kontor_source <- elprofiler$`elprofil_foretag ny_kontor`
 el_aldre_kontor_source <- elprofiler$`elprofil_foretag aldre_kontor`
 
 heat_column_map <- c(
-  "V\u00e4rmeprofil foretag aldre_flerbostadshus" = "aldre_flerbostadshus",
-  "V\u00e4rmeprofil privat aldre_villa" = "aldre_villa",
-  "V\u00e4rmeprofil foretag ny_flerbostadshus" = "ny_flerbostadshus",
-  "V\u00e4rmeprofil privat ny_villa" = "ny_villa",
-  "V\u00e4rmeprofil foretag ny_kontor" = "ny_kontor",
-  "V\u00e4rmeprofil foretag aldre_kontor" = "aldre_kontor"
+  "Värmeprofil foretag aldre_flerbostadshus" = "aldre_flerbostadshus",
+  "Värmeprofil privat aldre_villa" = "aldre_villa",
+  "Värmeprofil foretag ny_flerbostadshus" = "ny_flerbostadshus",
+  "Värmeprofil privat ny_villa" = "ny_villa",
+  "Värmeprofil foretag ny_kontor" = "ny_kontor",
+  "Värmeprofil foretag aldre_kontor" = "aldre_kontor"
 )
 
 electricity_sources <- list(
@@ -57,7 +65,7 @@ electricity_sources <- list(
 )
 
 output_column_order <- c(
-  "M\u00e5nad",
+  "Månad",
   "Veckodag",
   "Dag",
   "Klockslag",
@@ -137,16 +145,16 @@ parse_mixed_decimal_number <- function(x) {
 
     if (has_comma && has_dot) {
       if (max(comma_pos) > max(dot_pos)) {
-        value <- str_replace_all(value, fixed("."), "")
-        str_replace(value, fixed(","), ".")
+        value <- str_replace_all(value, stringr::fixed("."), "")
+        str_replace(value, stringr::fixed(","), ".")
       } else {
-        str_replace_all(value, fixed(","), "")
+        str_replace_all(value, stringr::fixed(","), "")
       }
     } else if (has_comma) {
-      value <- str_replace_all(value, fixed("."), "")
-      str_replace(value, fixed(","), ".")
+      value <- str_replace_all(value, stringr::fixed("."), "")
+      str_replace(value, stringr::fixed(","), ".")
     } else {
-      str_replace_all(value, fixed(","), "")
+      str_replace_all(value, stringr::fixed(","), "")
     }
   })
 
@@ -158,10 +166,25 @@ parse_mixed_decimal_number <- function(x) {
 }
 
 read_semicolon_csv <- function(path, col_select = NULL) {
+  col_select_quo <- rlang::enquo(col_select)
+
+  if (rlang::quo_is_null(col_select_quo)) {
+    return(
+      suppressMessages(
+        read_csv2(
+          normalize_fs_path(path),
+          col_types = cols(.default = col_character()),
+          show_col_types = FALSE,
+          progress = FALSE
+        )
+      )
+    )
+  }
+
   suppressMessages(
     read_csv2(
       normalize_fs_path(path),
-      col_select = col_select,
+      col_select = !!col_select_quo,
       col_types = cols(.default = col_character()),
       show_col_types = FALSE,
       progress = FALSE
