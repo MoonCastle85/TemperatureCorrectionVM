@@ -99,6 +99,10 @@ required_input_cols <- c(
 )
 
 allowed_heat_profile_keys <- unname(heat_column_map)
+heat_profile_aliases <- c(
+  "nytt_flerbostadshus" = "ny_flerbostadshus",
+  "nytt_kontor" = "ny_kontor"
+)
 
 profiler_col_types <- cols_only(
   year = col_double(),
@@ -216,12 +220,14 @@ extract_location_name <- function(source_file_value) {
   sanitize_filename_part(location_name)
 }
 
-derive_heat_profile_key <- function(profile_id_values, allowed_keys) {
-  key_pattern <- paste(allowed_keys, collapse = "|")
-  derived <- str_extract(as.character(profile_id_values), key_pattern)
+derive_heat_profile_key <- function(profile_id_values, allowed_keys, aliases = heat_profile_aliases) {
+  profile_id_values <- str_trim(as.character(profile_id_values))
+  aliased_values <- unname(aliases[profile_id_values])
+  derived <- ifelse(is.na(aliased_values), profile_id_values, aliased_values)
+  invalid_rows <- is.na(derived) | !derived %in% allowed_keys
 
-  if (anyNA(derived)) {
-    missing_examples <- unique(as.character(profile_id_values[is.na(derived)]))
+  if (any(invalid_rows)) {
+    missing_examples <- unique(as.character(profile_id_values[invalid_rows]))
     missing_examples <- missing_examples[seq_len(min(length(missing_examples), 5))]
 
     stop(
@@ -252,7 +258,8 @@ read_profiler_results <- function(path) {
     mutate(
       heat_profile_key = derive_heat_profile_key(
         profile_id,
-        allowed_keys = allowed_heat_profile_keys
+        allowed_keys = allowed_heat_profile_keys,
+        aliases = heat_profile_aliases
       )
     )
 
