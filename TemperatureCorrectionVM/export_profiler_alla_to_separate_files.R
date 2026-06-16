@@ -220,6 +220,41 @@ extract_location_name <- function(source_file_value) {
   sanitize_filename_part(location_name)
 }
 
+build_output_location_labels <- function(source_file_values) {
+  unique_sources <- unique(as.character(source_file_values))
+  source_stems <- tools::file_path_sans_ext(unique_sources)
+  source_parts <- str_split(source_stems, "_")
+
+  candidate_first <- map_chr(source_parts, \(parts) parts[[1]])
+  candidate_first_second <- map_chr(source_parts, \(parts) {
+    if (length(parts) >= 2 && nzchar(parts[[2]]) && parts[[2]] != parts[[1]]) {
+      paste(parts[[1]], parts[[2]])
+    } else {
+      parts[[1]]
+    }
+  })
+  candidate_without_code <- map_chr(source_parts, \(parts) {
+    if (length(parts) >= 2 && grepl("^[0-9]+$", parts[[length(parts)]])) {
+      parts <- parts[-length(parts)]
+    }
+    paste(parts, collapse = " ")
+  })
+  candidate_full <- str_replace_all(source_stems, "_", " ")
+
+  labels <- candidate_first
+
+  duplicate_mask <- duplicated(labels) | duplicated(labels, fromLast = TRUE)
+  labels[duplicate_mask] <- candidate_first_second[duplicate_mask]
+
+  duplicate_mask <- duplicated(labels) | duplicated(labels, fromLast = TRUE)
+  labels[duplicate_mask] <- candidate_without_code[duplicate_mask]
+
+  duplicate_mask <- duplicated(labels) | duplicated(labels, fromLast = TRUE)
+  labels[duplicate_mask] <- candidate_full[duplicate_mask]
+
+  setNames(labels, unique_sources)
+}
+
 derive_heat_profile_key <- function(profile_id_values, allowed_keys, aliases = heat_profile_aliases) {
   profile_id_values <- str_trim(as.character(profile_id_values))
   aliased_values <- unname(aliases[profile_id_values])
@@ -263,6 +298,9 @@ read_profiler_results <- function(path) {
         aliases = heat_profile_aliases
       )
     )
+
+  output_location_labels <- build_output_location_labels(profiler_data$source_file)
+  profiler_data$output_location_name <- unname(output_location_labels[profiler_data$source_file])
 
   profiler_data
 }
@@ -488,7 +526,7 @@ build_output_table <- function(location_data, electricity_table) {
 }
 
 build_output_filename <- function(location_data) {
-  location_name <- unique(location_data$location_name)
+  location_name <- unique(location_data$output_location_name)
 
   paste0(
     "Timprofiler ",
@@ -528,8 +566,8 @@ write_output_csv <- function(data, path) {
 
 validate_unique_output_filenames <- function(profiler_data) {
   output_files <- profiler_data %>%
-    distinct(source_file, year, location_name) %>%
-    mutate(output_filename = paste0("Timprofiler ", location_name, ".csv")) %>%
+    distinct(source_file, year, output_location_name) %>%
+    mutate(output_filename = paste0("Timprofiler ", output_location_name, ".csv")) %>%
     count(output_filename, name = "n") %>%
     filter(n > 1)
 
