@@ -256,6 +256,7 @@ read_profiler_results <- function(path) {
   ) %>%
     assert_required_columns(required_input_cols, "Profiler_alla.csv") %>%
     mutate(
+      location_name = extract_location_name(source_file),
       heat_profile_key = derive_heat_profile_key(
         profile_id,
         allowed_keys = allowed_heat_profile_keys,
@@ -393,6 +394,31 @@ build_electricity_table <- function(template_hours) {
   )
 }
 
+normalize_heat_profile_columns <- function(data) {
+  heat_cols <- names(heat_column_map)
+
+  for (col_name in heat_cols) {
+    column_sum <- sum(data[[col_name]], na.rm = TRUE)
+
+    if (!is.finite(column_sum) || column_sum == 0) {
+      stop(
+        paste0(
+          "Column '",
+          col_name,
+          "' cannot be normalized because its sum is ",
+          column_sum,
+          "."
+        ),
+        call. = FALSE
+      )
+    }
+
+    data[[col_name]] <- as.double(data[[col_name]] / column_sum)
+  }
+
+  data
+}
+
 build_output_table <- function(location_data, electricity_table) {
   location_data <- location_data %>%
     arrange(hour)
@@ -446,6 +472,8 @@ build_output_table <- function(location_data, electricity_table) {
     rename(!!!setNames(unname(heat_column_map), names(heat_column_map))) %>%
     left_join(electricity_table, by = "hour")
 
+  output_table <- normalize_heat_profile_columns(output_table)
+
   output_table %>%
     transmute(
       month_out = month,
@@ -460,18 +488,34 @@ build_output_table <- function(location_data, electricity_table) {
 }
 
 build_output_filename <- function(location_data) {
-  source_file <- unique(location_data$source_file)
+  location_name <- unique(location_data$location_name)
 
   paste0(
     "Timprofiler ",
-    extract_location_name(source_file[[1]]),
+    location_name[[1]],
     ".csv"
   )
 }
 
+format_numeric_vector <- function(x) {
+  ifelse(
+    is.na(x),
+    "",
+    trimws(format(x, scientific = FALSE, trim = TRUE, digits = 15, decimal.mark = ","))
+  )
+}
+
+prepare_output_for_write <- function(data) {
+  numeric_cols <- vapply(data, is.numeric, logical(1))
+  data[numeric_cols] <- lapply(data[numeric_cols], format_numeric_vector)
+  data
+}
+
 write_output_csv <- function(data, path) {
+  data_to_write <- prepare_output_for_write(data)
+
   write.table(
-    data,
+    data_to_write,
     file = path,
     sep = ";",
     dec = ",",
@@ -482,10 +526,31 @@ write_output_csv <- function(data, path) {
   )
 }
 
+validate_unique_output_filenames <- function(profiler_data) {
+  output_files <- profiler_data %>%
+    distinct(source_file, year, location_name) %>%
+    mutate(output_filename = paste0("Timprofiler ", location_name, ".csv")) %>%
+    count(output_filename, name = "n") %>%
+    filter(n > 1)
+
+  if (nrow(output_files) > 0) {
+    stop(
+      paste0(
+        "Multiple input groups would write to the same output filename: ",
+        paste(output_files$output_filename, collapse = ", "),
+        "."
+      ),
+      call. = FALSE
+    )
+  }
+}
+
 export_profiler_files <- function(profiler_data, output_dir) {
   if (!dir.exists(output_dir)) {
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
+
+  validate_unique_output_filenames(profiler_data)
 
   template_hours <- sort(unique(profiler_data$hour))
   electricity_table <- build_electricity_table(template_hours)
