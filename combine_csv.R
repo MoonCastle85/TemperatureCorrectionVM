@@ -11,4 +11,5 @@ combined <- map(files, \(x) read_csv2(x, col_select = -c("profile_id"), id = "pr
 combined2 <- combined %>%
   mutate(profile_id = str_extract(profile_id, ".*(?=\\.csv$)"))
 
-write_csv2(combined, file = "Profiler_alla.csv")
+setwd("C:/Git/TemperatureCorrectionVM")
+write_csv2(combined2, file = "Profiler_alla.csv")
