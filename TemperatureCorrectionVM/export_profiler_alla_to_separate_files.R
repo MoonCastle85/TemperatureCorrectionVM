@@ -30,8 +30,8 @@ output_dir <- "C:/Git/TemperatureCorrectionVM/Outputs"
 elprofiler <- suppressMessages(
   read_csv2(
     paste0(
-      "C:/Users/vanja/OneDrive - Profu/Fjärrkontrollen - Profu - Documents/Admin/",
-      "3. Underlag profiler, COP, inv kostnader osv/Profiler värme och el för fastigheterna/",
+      "C:/Users/vanja/OneDrive - Profu/Fj\u00e4rrkontrollen - Profu - Documents/Admin/",
+      "3. Underlag profiler, COP, inv kostnader osv/Profiler v\u00e4rme och el f\u00f6r fastigheterna/",
       "Analys profiler/elprofiler_alla.csv"
     ),
     show_col_types = FALSE,
@@ -39,20 +39,20 @@ elprofiler <- suppressMessages(
   )
 )
 
-el_aldre_flerbostadshus_source <- elprofiler$`elprofil_foretag aldre_flerbostadshus`
-el_aldre_villa_source <- elprofiler$`elprofil_privat aldre_villa`
-el_ny_flerbostadshus_source <- elprofiler$`elprofil_foretag ny_flerbostadshus`
-el_ny_villa_source <- elprofiler$`elprofil_privat ny_villa`
-el_ny_kontor_source <- elprofiler$`elprofil_foretag ny_kontor`
-el_aldre_kontor_source <- elprofiler$`elprofil_foretag aldre_kontor`
+el_aldre_flerbostadshus_source <- elprofiler[["elprofil_foretag aldre_flerbostadshus"]]
+el_aldre_villa_source <- elprofiler[["elprofil_privat aldre_villa"]]
+el_ny_flerbostadshus_source <- elprofiler[["elprofil_foretag ny_flerbostadshus"]]
+el_ny_villa_source <- elprofiler[["elprofil_privat ny_villa"]]
+el_ny_kontor_source <- elprofiler[["elprofil_foretag ny_kontor"]]
+el_aldre_kontor_source <- elprofiler[["elprofil_foretag aldre_kontor"]]
 
 heat_column_map <- c(
-  "Värmeprofil foretag aldre_flerbostadshus" = "aldre_flerbostadshus",
-  "Värmeprofil privat aldre_villa" = "aldre_villa",
-  "Värmeprofil foretag ny_flerbostadshus" = "ny_flerbostadshus",
-  "Värmeprofil privat ny_villa" = "ny_villa",
-  "Värmeprofil foretag ny_kontor" = "ny_kontor",
-  "Värmeprofil foretag aldre_kontor" = "aldre_kontor"
+  "V\u00e4rmeprofil foretag aldre_flerbostadshus" = "aldre_flerbostadshus",
+  "V\u00e4rmeprofil privat aldre_villa" = "aldre_villa",
+  "V\u00e4rmeprofil foretag ny_flerbostadshus" = "ny_flerbostadshus",
+  "V\u00e4rmeprofil privat ny_villa" = "ny_villa",
+  "V\u00e4rmeprofil foretag ny_kontor" = "ny_kontor",
+  "V\u00e4rmeprofil foretag aldre_kontor" = "aldre_kontor"
 )
 
 electricity_sources <- list(
@@ -65,7 +65,7 @@ electricity_sources <- list(
 )
 
 output_column_order <- c(
-  "Månad",
+  "M\u00e5nad",
   "Veckodag",
   "Dag",
   "Klockslag",
@@ -99,6 +99,19 @@ required_input_cols <- c(
 )
 
 allowed_heat_profile_keys <- unname(heat_column_map)
+
+profiler_col_types <- cols_only(
+  year = col_double(),
+  month = col_double(),
+  weekday = col_double(),
+  day = col_double(),
+  time = col_double(),
+  hour = col_double(),
+  temperature = col_double(),
+  source_file = col_character(),
+  profile_id = col_character(),
+  pred_load_new = col_double()
+)
 
 # -----------------
 # Helpers
@@ -227,31 +240,21 @@ derive_heat_profile_key <- function(profile_id_values, allowed_keys) {
 }
 
 read_profiler_results <- function(path) {
-  profiler_data <- read_semicolon_csv(
-    path,
-    col_select = all_of(required_input_cols)
+  profiler_data <- suppressMessages(
+    read_csv2(
+      normalize_fs_path(path),
+      col_types = profiler_col_types,
+      show_col_types = FALSE,
+      progress = FALSE
+    )
   ) %>%
     assert_required_columns(required_input_cols, "Profiler_alla.csv") %>%
     mutate(
-      across(
-        all_of(c(
-          "year",
-          "month",
-          "weekday",
-          "day",
-          "time",
-          "hour",
-          "temperature",
-          "pred_load_new"
-        )),
-        parse_mixed_decimal_number
+      heat_profile_key = derive_heat_profile_key(
+        profile_id,
+        allowed_keys = allowed_heat_profile_keys
       )
     )
-
-  profiler_data$heat_profile_key <- derive_heat_profile_key(
-    profiler_data$profile_id,
-    allowed_keys = allowed_heat_profile_keys
-  )
 
   profiler_data
 }
@@ -365,7 +368,25 @@ standardize_electricity_profile <- function(source, output_col, template_hours) 
     filter(hour %in% template_hours)
 }
 
-build_output_table <- function(location_data) {
+build_electricity_table <- function(template_hours) {
+  electricity_tables <- imap(
+    electricity_sources,
+    \(source, output_name) {
+      standardize_electricity_profile(
+        source = source,
+        output_col = output_name,
+        template_hours = template_hours
+      )
+    }
+  )
+
+  reduce(
+    electricity_tables,
+    \(left, right) left_join(left, right, by = "hour")
+  )
+}
+
+build_output_table <- function(location_data, electricity_table) {
   location_data <- location_data %>%
     arrange(hour)
 
@@ -384,11 +405,7 @@ build_output_table <- function(location_data) {
     )
   }
 
-  duplicate_heat_rows <- location_data %>%
-    count(hour, heat_profile_key, name = "n") %>%
-    filter(n > 1)
-
-  if (nrow(duplicate_heat_rows) > 0) {
+  if (anyDuplicated(location_data[c("hour", "heat_profile_key")]) > 0) {
     stop(
       paste0(
         "Location '",
@@ -400,13 +417,11 @@ build_output_table <- function(location_data) {
   }
 
   base_table <- location_data %>%
-    select(hour, month, weekday, day, time, temperature) %>%
-    distinct() %>%
+    distinct(hour, month, weekday, day, time, temperature) %>%
     arrange(hour)
 
   heat_table <- location_data %>%
     select(hour, heat_profile_key, pred_load_new) %>%
-    distinct() %>%
     pivot_wider(names_from = heat_profile_key, values_from = pred_load_new)
 
   output_table <- base_table %>%
@@ -421,20 +436,8 @@ build_output_table <- function(location_data) {
   }
 
   output_table <- output_table %>%
-    rename(!!!setNames(unname(heat_column_map), names(heat_column_map)))
-
-  template_hours <- output_table$hour
-
-  for (output_name in names(electricity_sources)) {
-    standardized_profile <- standardize_electricity_profile(
-      electricity_sources[[output_name]],
-      output_col = output_name,
-      template_hours = template_hours
-    )
-
-    output_table <- output_table %>%
-      left_join(standardized_profile, by = "hour")
-  }
+    rename(!!!setNames(unname(heat_column_map), names(heat_column_map))) %>%
+    left_join(electricity_table, by = "hour")
 
   output_table %>%
     transmute(
@@ -477,17 +480,17 @@ export_profiler_files <- function(profiler_data, output_dir) {
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
 
-  split_groups <- split(
-    profiler_data,
-    interaction(profiler_data$source_file, profiler_data$year, drop = TRUE, lex.order = TRUE)
-  )
+  template_hours <- sort(unique(profiler_data$hour))
+  electricity_table <- build_electricity_table(template_hours)
 
-  walk(split_groups, \(location_data) {
-    output_table <- build_output_table(location_data)
-    output_path <- file.path(output_dir, build_output_filename(location_data))
-    write_output_csv(output_table[, output_column_order], output_path)
-    message("Wrote: ", output_path)
-  })
+  profiler_data %>%
+    group_by(source_file, year) %>%
+    group_walk(\(.x, .y) {
+      output_table <- build_output_table(.x, electricity_table)
+      output_path <- file.path(output_dir, build_output_filename(.x))
+      write_output_csv(output_table[, output_column_order], output_path)
+      message("Wrote: ", output_path)
+    })
 }
 
 main <- function() {
