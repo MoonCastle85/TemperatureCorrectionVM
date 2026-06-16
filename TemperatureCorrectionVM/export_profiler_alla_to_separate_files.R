@@ -497,7 +497,7 @@ export_profiler_files <- function(profiler_data, output_dir) {
       output_path <- file.path(output_dir, build_output_filename(.x))
       write_output_csv(output_table[, output_column_order], output_path)
       message("Wrote: ", output_path)
-    })
+    }, .keep = TRUE)
 }
 
 main <- function() {
