@@ -8,12 +8,12 @@ walk(pred_functions, source)
 required_profile_cols <- c("month", "weekday", "day", "time", "hour", "temperature", "heat_load_kw")
 required_temp_cols <- c("year", "month", "weekday", "day", "time", "hour", "temperature")
 csv2_locale <- readr::locale(decimal_mark = ",", grouping_mark = ".")
-orig_profile_path <- "C:/Users/vanja/OneDrive - Profu/Umeå Energi - Documents/Flexibla energilösningar/kv Renen/2. Underlag/originalprofil_kontor.csv"
+orig_profile_path <- "C:/Users/vanja/OneDrive - Profu/UmeÃ¥ Energi - Documents/Flexibla energilÃ¶sningar/kv Renen/2. Underlag/originalprofil_kontor.csv"
 temp_folder_path <- "./Temperatures for prediction"
 output_path <- "Outputs/Varmeprofiler_GBG_2015-2025.csv"
 stop_temp_c <- 15
 prediction_mode <- "standard"
-target_max_load <- 63
+restriction_spec <- NULL
 
 assert_required_columns <- function(data, required_cols, label) {
   missing_cols <- setdiff(required_cols, names(data))
@@ -182,7 +182,7 @@ predict_temperature_profile <- function(
   model_fits,
   stop_temp_c = 15,
   prediction_mode = "standard",
-  target_max_load = 63
+  restriction_spec = NULL
 ) {
   heating_input <- temp_profile %>%
     filter(temperature < stop_temp_c)
@@ -213,11 +213,9 @@ predict_temperature_profile <- function(
   apply_prediction_mode(
     combined_prediction,
     prediction_mode = prediction_mode,
-    target_max_load = target_max_load,
-    stop_temp_c = stop_temp_c
+    restriction_spec = restriction_spec
   )
 }
-
 orig_profile <- read_standard_profile(orig_profile_path) %>%
   assert_usable_profile_rows(stop_temp_c = stop_temp_c)
 temp_profiles <- read_temperature_folder(temp_folder_path)
@@ -237,7 +235,7 @@ all_predictions <- temp_profiles %>%
       model_fits = model_fits,
       stop_temp_c = stop_temp_c,
       prediction_mode = prediction_mode,
-      target_max_load = target_max_load
+      restriction_spec = restriction_spec
     )
   }) %>%
   list_rbind() %>%
@@ -264,3 +262,4 @@ ggplot() +
 # =================
 
 write_csv2(all_predictions, file = output_path)
+

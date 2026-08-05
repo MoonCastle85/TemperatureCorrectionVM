@@ -19,13 +19,9 @@ walk(pred_functions, source)
 required_profile_cols <- c("month", "weekday", "day", "time", "hour", "temperature", "heat_load_kw")
 required_temp_cols <- c("year", "month", "weekday", "day", "time", "hour", "temperature")
 csv2_locale <- readr::locale(decimal_mark = ",", grouping_mark = ".")
-strict_mode_target_max_load <- 63
 prediction_mode_choices <- setNames(
-  c("standard", "strict_fixed_peak_63"),
-  c(
-    "Standard",
-    paste0("Climate-adjusted strict (max load = ", strict_mode_target_max_load, ")")
-  )
+  c("standard", "strict"),
+  c("Standard", "Strict")
 )
 
 assert_required_columns <- function(data, required_cols, label) {
@@ -182,19 +178,6 @@ read_temperature_file <- function(file_path, file_name) {
     )
 }
 
-read_temperature_upload <- function(file_info) {
-  csv_files <- get_temperature_uploads(file_info)
-
-  map2(
-    csv_files$datapath,
-    csv_files$name,
-    read_temperature_file
-  ) %>%
-    list_rbind() %>%
-    arrange(year, source_file, hour) %>%
-    select(profile_id, source_file, year, month, weekday, day, time, hour, temperature, is_weekend)
-}
-
 empty_prediction <- function(template) {
   template[0, , drop = FALSE] %>%
     mutate(pred_load_new = numeric())
@@ -206,7 +189,7 @@ predict_temperature_profile <- function(
   model_fits,
   stop_temp_c = 15,
   prediction_mode = "standard",
-  target_max_load = 63
+  restriction_spec = NULL
 ) {
   heating_input <- temp_profile %>%
     filter(temperature < stop_temp_c)
@@ -237,11 +220,122 @@ predict_temperature_profile <- function(
   apply_prediction_mode(
     combined_prediction,
     prediction_mode = prediction_mode,
-    target_max_load = target_max_load,
-    stop_temp_c = stop_temp_c
+    restriction_spec = restriction_spec
   )
 }
 
+build_monthly_restriction_table <- function(profile_data) {
+  monthly_reference <- profile_data %>%
+    group_by(month) %>%
+    summarise(original_monthly_sum = sum(heat_load_kw, na.rm = TRUE), .groups = "drop")
+
+  tibble(month = 1:12, month_label = month.abb) %>%
+    left_join(monthly_reference, by = "month") %>%
+    arrange(month) %>%
+    mutate(
+      original_monthly_sum = as.double(original_monthly_sum),
+      min_heat_load_kw_sum = original_monthly_sum,
+      max_heat_load_kw_sum = original_monthly_sum
+    ) %>%
+    select(month, month_label, original_monthly_sum, min_heat_load_kw_sum, max_heat_load_kw_sum)
+}
+
+build_daily_restriction_table <- function(profile_data, max_yearday = 10L) {
+  daily_reference <- profile_data %>%
+    mutate(yearday = calculate_yearday(month, day)) %>%
+    group_by(yearday) %>%
+    summarise(original_daily_average = mean(heat_load_kw, na.rm = TRUE), .groups = "drop")
+
+  tibble(yearday = seq_len(max_yearday)) %>%
+    left_join(daily_reference, by = "yearday") %>%
+    arrange(yearday) %>%
+    mutate(
+      original_daily_average = as.double(original_daily_average),
+      min_heat_load_kw_daily_avg = original_daily_average,
+      max_heat_load_kw_daily_avg = original_daily_average
+    )
+}
+
+apply_table_edit <- function(data, edit_info, display_columns, lower_col, upper_col, label) {
+  if (is.null(data) || is.null(edit_info)) {
+    return(data)
+  }
+
+  column_name <- display_columns[[edit_info$col + 1]]
+
+  if (is.na(column_name) || !nzchar(column_name)) {
+    return(data)
+  }
+
+  new_value <- parse_mixed_decimal_number(edit_info$value)
+
+  if (!is.finite(new_value)) {
+    stop(paste0(label, " only accepts numeric values in editable cells."), call. = FALSE)
+  }
+
+  if (new_value < 0) {
+    stop(paste0(label, " does not allow negative bounds."), call. = FALSE)
+  }
+
+  updated <- data
+  updated[[column_name]][edit_info$row] <- as.double(new_value)
+
+  invalid_rows <- which(updated[[lower_col]] > updated[[upper_col]])
+
+  if (length(invalid_rows) > 0) {
+    stop(paste0(label, " has one or more rows where the lower bound is greater than the upper bound."), call. = FALSE)
+  }
+
+  updated
+}
+
+build_strict_restriction_spec <- function(monthly_table, daily_table) {
+  if (is.null(monthly_table) || is.null(daily_table)) {
+    stop("Upload a heating profile to configure strict-mode restrictions.", call. = FALSE)
+  }
+
+  assert_required_columns(
+    monthly_table,
+    c("month", "original_monthly_sum", "min_heat_load_kw_sum", "max_heat_load_kw_sum"),
+    "Monthly strict restriction table"
+  )
+  assert_required_columns(
+    daily_table,
+    c("yearday", "original_daily_average", "min_heat_load_kw_daily_avg", "max_heat_load_kw_daily_avg"),
+    "Daily strict restriction table"
+  )
+
+  if (any(!is.finite(monthly_table$original_monthly_sum))) {
+    stop("Monthly strict restriction table contains missing reference sums. Check the uploaded heating profile.", call. = FALSE)
+  }
+
+  if (any(!is.finite(daily_table$original_daily_average))) {
+    stop("Daily strict restriction table contains missing reference daily averages. Check the uploaded heating profile.", call. = FALSE)
+  }
+
+  if (any(!is.finite(monthly_table$min_heat_load_kw_sum)) || any(!is.finite(monthly_table$max_heat_load_kw_sum))) {
+    stop("Monthly strict restriction table contains missing or invalid bounds.", call. = FALSE)
+  }
+
+  if (any(!is.finite(daily_table$min_heat_load_kw_daily_avg)) || any(!is.finite(daily_table$max_heat_load_kw_daily_avg))) {
+    stop("Daily strict restriction table contains missing or invalid bounds.", call. = FALSE)
+  }
+
+  if (any(monthly_table$min_heat_load_kw_sum > monthly_table$max_heat_load_kw_sum)) {
+    stop("Monthly strict restriction table contains rows where the lower bound is greater than the upper bound.", call. = FALSE)
+  }
+
+  if (any(daily_table$min_heat_load_kw_daily_avg > daily_table$max_heat_load_kw_daily_avg)) {
+    stop("Daily strict restriction table contains rows where the lower bound is greater than the upper bound.", call. = FALSE)
+  }
+
+  list(
+    monthly = monthly_table %>%
+      transmute(month, min_heat_load_kw_sum, max_heat_load_kw_sum),
+    daily = daily_table %>%
+      transmute(yearday, min_heat_load_kw_daily_avg, max_heat_load_kw_daily_avg)
+  )
+}
 my_ui <- fluidPage(
   theme = shinytheme("cerulean"),
   shinyjs::useShinyjs(),
@@ -290,7 +384,7 @@ my_ui <- fluidPage(
         choices = prediction_mode_choices,
         selected = "standard"
       ),
-      helpText(paste0("Strict mode rescales each predicted profile so its maximum load is exactly ", strict_mode_target_max_load, ".")),
+      uiOutput("strict_mode_ui"),
       sliderInput(
         "pointsize",
         "Adjust the size of the points in the graphs",
@@ -313,125 +407,6 @@ my_ui <- fluidPage(
   )
 )
 
-if (FALSE) {
-  knn_spec_triang <- reactive({
-    nearest_neighbor(weight_func = "triangular", neighbors = input$my_neighbours) %>% 
-    set_engine("kknn") %>% 
-    set_mode("regression")
-  })
-  
-  rf_spec <- reactive({
-    rand_forest(trees = input$my_trees) %>%
-    set_engine("ranger") %>%
-    set_mode("regression")
-  })
-
-  my_workflows <- reactive({
-    result <- workflow_set(preproc = list(rec = my_recipes()),
-                           models = list(KNN = knn_spec_triang(), RF = rf_spec()))
-  })
-  
-  fit_all <- reactive({
-    fit_all <- map(.x = my_workflows()$wflow_id, 
-                   .f = \(x) fit(extract_workflow(my_workflows(), x), data = reactive_profile_no_outliers()))
-    
-    return(fit_all)
-  })
-  
-  knn_result <- reactive({
-    knn_pred <- predict(fit_all()[[1]], new_data = reactive_selected_temp())
-    result_knn <- bind_cols(reactive_selected_temp(), predikterat = round(knn_pred, 1))
-    
-    return(result_knn)
-  })
-
-  rf_result <- reactive({
-    rf_pred <- predict(fit_all()[[2]], new_data = reactive_selected_temp())
-    result_rf <- bind_cols(reactive_selected_temp(), predikterat = round(rf_pred, 1))
-    
-    return(result_rf)
-  })
-  
-  orig_data <- reactive({
-    reactive_ursprungsprofil() %>%
-      rename(original_temperature = temperature, original_load = load)
-  })
-  
-  final_knn <- reactive({
-    bind_cols(orig_data(), knn_result()) %>%
-    dplyr::select(original_temperature, original_load, temperature, .pred) %>%
-    rename(temperature_normal = temperature, predicted_knn_load = .pred)
-  })
-
-  final_rf <- reactive({
-      bind_cols(orig_data(), rf_result()) %>%
-      dplyr::select(original_temperature, original_load, temperature, .pred) %>%
-      rename(predicted_rf_load = .pred)
-  })
-
-  selected_algorithm_data <- reactive({
-    switch(input$algorithms, "my_knn" = knn_result(), "my_rf" = rf_result())
-  })
-  
-  selected_table_data <- reactive({
-    switch(input$algorithms, "my_knn" = final_knn(), "my_rf" = final_rf())
-  })
-  
-  output$mainPlot <- renderPlotly({
-      g1 = ggplot() +
-          geom_point(data = reactive_ursprungsprofil(), 
-                     mapping = aes(x = temperature, y = load, colour = "Original"), size = input$pointsize) +
-          geom_point(data = selected_algorithm_data(), 
-                     mapping = aes(x = temperature, y = .pred, colour = "Predicted"), size = input$pointsize, shape = 21) +
-          labs(title = "Load vs temperature data", x = "Outdoor temperature (°C)", y = "Heating load (kW)") +
-          scale_colour_manual(values = c("Original" = "blue", "Predicted" = "red"), labels = c("Original", "Predicted"),
-                              name = "Data source") +
-          scale_x_continuous(n.breaks = 10) +
-          scale_y_continuous(n.breaks = 10)
-      
-      ggplotly(g1)
-  })
-  
-  output$secondaryPlot <- renderPlotly({
-    g2 = ggplot() +
-      geom_point(data = reactive_ursprungsprofil(),
-                 mapping = aes(x = seq(1,length(reactive_ursprungsprofil()$temperature),1), y = load, colour = "Original"),
-                 size = input$pointsize) +
-      geom_point(data = selected_algorithm_data(),
-                 mapping = aes(x = seq(1,8760,1), y = .pred, colour = "Predicted"),
-                 size = input$pointsize, shape = 21) +
-      labs(title = "Load vs temperature data", x = "Hour of the year", y = "Heating load (kW or MW)") +
-      scale_colour_manual(values = c("Original" = "blue", "Predicted" = "red"), labels = c("Original", "Predicted"),
-                          name = "Data source") +
-      scale_x_continuous(n.breaks = 12) +
-      scale_y_continuous(n.breaks = 10)
-
-    ggplotly(g2)
-  })
-  
-  output$my_DT <- DT::renderDT({
-      datatable(selected_table_data(),
-                options = list(initComplete = JS("function(settings, json) {",
-                                                 "  Shiny.setInputValue('table_rendered', true);", "}")
-                )
-      )
-  })
-  
-  observeEvent(input$table_rendered, {
-      shinyjs::enable("download_result")
-      shinyjs::removeClass("download_result", "btn-disabled")
-  })
-  
-  output$download_result <- downloadHandler(
-      filename = function() {
-          paste0("Corrected_load_", Sys.Date(), "_", format(Sys.time(), "%H_%M_%S"), ".csv")
-      },
-      content = function(file) {
-          write_csv2(selected_table_data(), file)
-      }
-  )
-}
-
 my_server <- function(input, output, session) {
   calculation_bundle <- reactiveVal(NULL)
   calculation_error <- reactiveVal(NULL)
@@ -441,6 +416,33 @@ my_server <- function(input, output, session) {
   progress_total <- reactiveVal(0L)
   progress_done <- reactiveVal(0L)
   progress_detail <- reactiveVal("No calculation has been run yet.")
+  monthly_restrictions <- reactiveVal(NULL)
+  daily_restrictions <- reactiveVal(NULL)
+
+  uploaded_profile_data <- reactive({
+    req(input$profile_file)
+
+    read_standard_profile(input$profile_file$datapath)
+  })
+
+  uploaded_profile_for_model <- reactive({
+    uploaded_profile_data() %>%
+      assert_usable_profile_rows(stop_temp_c = input$stop_temp_c)
+  })
+
+  strict_reference_tables <- reactive({
+    profile_data <- uploaded_profile_data()
+
+    list(
+      monthly = build_monthly_restriction_table(profile_data),
+      daily = build_daily_restriction_table(profile_data)
+    )
+  })
+
+  observeEvent(strict_reference_tables(), {
+    monthly_restrictions(strict_reference_tables()$monthly)
+    daily_restrictions(strict_reference_tables()$daily)
+  }, ignoreInit = TRUE)
 
   bundle_status_message <- function() {
     if (!is.null(calculation_error())) {
@@ -473,12 +475,16 @@ my_server <- function(input, output, session) {
 
     tryCatch({
       prediction_mode <- input$prediction_mode
-      prediction_mode_label <- get_prediction_mode_label(
-        prediction_mode,
-        target_max_load = strict_mode_target_max_load
-      )
-      profile_data <- read_standard_profile(input$profile_file$datapath) %>%
-        assert_usable_profile_rows(stop_temp_c = input$stop_temp_c)
+      prediction_mode_label <- get_prediction_mode_label(prediction_mode)
+      restriction_spec <- if (prediction_mode == "strict") {
+        build_strict_restriction_spec(
+          monthly_restrictions(),
+          daily_restrictions()
+        )
+      } else {
+        NULL
+      }
+      profile_data <- uploaded_profile_for_model()
       csv_files <- get_temperature_uploads(input$temp_files)
       total_files <- nrow(csv_files)
 
@@ -509,7 +515,7 @@ my_server <- function(input, output, session) {
                 model_fits = model_fits,
                 stop_temp_c = input$stop_temp_c,
                 prediction_mode = prediction_mode,
-                target_max_load = strict_mode_target_max_load
+                restriction_spec = restriction_spec
               )
             }) %>%
             list_rbind()
@@ -536,8 +542,7 @@ my_server <- function(input, output, session) {
         original_profile = profile_data,
         predictions = predictions,
         prediction_mode = prediction_mode,
-        prediction_mode_label = prediction_mode_label,
-        target_max_load = strict_mode_target_max_load
+        prediction_mode_label = prediction_mode_label
       ))
       calculation_run_id(calculation_run_id() + 1L)
       progress_done(total_files)
@@ -566,7 +571,6 @@ my_server <- function(input, output, session) {
       showNotification(conditionMessage(e), type = "error", duration = NULL)
     })
   }, ignoreInit = TRUE)
-
   observeEvent(input$draw_graphs, {
     req(calculation_bundle())
 
@@ -574,6 +578,123 @@ my_server <- function(input, output, session) {
     drawn_run_id(calculation_run_id())
   }, ignoreInit = TRUE)
 
+  output$strict_mode_ui <- renderUI({
+    if (input$prediction_mode != "strict") {
+      return(NULL)
+    }
+
+    if (is.null(input$profile_file)) {
+      return(helpText("Upload a heating profile to configure strict-mode monthly sums and year-day 1-10 daily averages."))
+    }
+
+    tagList(
+      helpText("Strict mode runs the standard prediction first and then adjusts the predicted results to fit the configured monthly and daily spans."),
+      fluidRow(
+        column(
+          width = 6,
+          tags$strong("Monthly sums"),
+          DTOutput("strict_monthly_table")
+        ),
+        column(
+          width = 6,
+          tags$strong("Daily averages (year days 1-10)"),
+          DTOutput("strict_daily_table")
+        )
+      )
+    )
+  })
+
+  output$strict_monthly_table <- renderDT({
+    req(input$prediction_mode == "strict")
+    table_data <- monthly_restrictions()
+    validate(need(!is.null(table_data), "Upload a heating profile to configure monthly restrictions."))
+
+    datatable(
+      table_data %>%
+        transmute(
+          Month = month_label,
+          `Original sum` = original_monthly_sum,
+          `Min sum` = min_heat_load_kw_sum,
+          `Max sum` = max_heat_load_kw_sum
+        ),
+      rownames = FALSE,
+      editable = list(target = "cell", disable = list(columns = c(0, 1))),
+      options = list(
+        dom = "t",
+        paging = FALSE,
+        ordering = FALSE,
+        searching = FALSE,
+        info = FALSE,
+        autoWidth = TRUE,
+        scrollX = TRUE
+      ),
+      class = "compact stripe"
+    ) %>%
+      formatRound(columns = c("Original sum", "Min sum", "Max sum"), digits = 2)
+  }, server = FALSE)
+
+  output$strict_daily_table <- renderDT({
+    req(input$prediction_mode == "strict")
+    table_data <- daily_restrictions()
+    validate(need(!is.null(table_data), "Upload a heating profile to configure daily restrictions."))
+
+    datatable(
+      table_data %>%
+        transmute(
+          `Year day` = yearday,
+          `Original daily average` = original_daily_average,
+          `Min daily average` = min_heat_load_kw_daily_avg,
+          `Max daily average` = max_heat_load_kw_daily_avg
+        ),
+      rownames = FALSE,
+      editable = list(target = "cell", disable = list(columns = c(0, 1))),
+      options = list(
+        dom = "t",
+        paging = FALSE,
+        ordering = FALSE,
+        searching = FALSE,
+        info = FALSE,
+        autoWidth = TRUE,
+        scrollX = TRUE
+      ),
+      class = "compact stripe"
+    ) %>%
+      formatRound(columns = c("Original daily average", "Min daily average", "Max daily average"), digits = 2)
+  }, server = FALSE)
+
+  observeEvent(input$strict_monthly_table_cell_edit, {
+    tryCatch({
+      monthly_restrictions(
+        apply_table_edit(
+          monthly_restrictions(),
+          input$strict_monthly_table_cell_edit,
+          display_columns = c(NA_character_, NA_character_, "min_heat_load_kw_sum", "max_heat_load_kw_sum"),
+          lower_col = "min_heat_load_kw_sum",
+          upper_col = "max_heat_load_kw_sum",
+          label = "Monthly strict restriction table"
+        )
+      )
+    }, error = function(e) {
+      showNotification(conditionMessage(e), type = "error", duration = NULL)
+    })
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$strict_daily_table_cell_edit, {
+    tryCatch({
+      daily_restrictions(
+        apply_table_edit(
+          daily_restrictions(),
+          input$strict_daily_table_cell_edit,
+          display_columns = c(NA_character_, NA_character_, "min_heat_load_kw_daily_avg", "max_heat_load_kw_daily_avg"),
+          lower_col = "min_heat_load_kw_daily_avg",
+          upper_col = "max_heat_load_kw_daily_avg",
+          label = "Daily strict restriction table"
+        )
+      )
+    }, error = function(e) {
+      showNotification(conditionMessage(e), type = "error", duration = NULL)
+    })
+  }, ignoreInit = TRUE)
   output$draw_button_ui <- renderUI({
     if (!is.null(calculation_bundle())) {
       actionButton("draw_graphs", "Draw Graphs", class = "btn btn-info")
@@ -630,12 +751,6 @@ my_server <- function(input, output, session) {
         disabled = "disabled"
       )
     }
-  })
-
-  original_profile <- reactive({
-    bundle <- calculation_bundle()
-    req(bundle)
-    bundle$original_profile
   })
 
   all_predictions <- reactive({
@@ -765,8 +880,8 @@ my_server <- function(input, output, session) {
     filename = function() {
       bundle <- calculation_bundle()
       req(bundle)
-      mode_suffix <- if (bundle$prediction_mode == "strict_fixed_peak_63") {
-        paste0("strict_", bundle$target_max_load)
+      mode_suffix <- if (bundle$prediction_mode == "strict") {
+        "strict"
       } else {
         "standard"
       }
@@ -780,3 +895,4 @@ my_server <- function(input, output, session) {
 }
 
 shinyApp(ui = my_ui, server = my_server)
+
