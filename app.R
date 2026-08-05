@@ -224,6 +224,22 @@ predict_temperature_profile <- function(
   )
 }
 
+round_half_up <- function(x, digits = 0) {
+  scale <- 10 ^ digits
+  sign(x) * floor(abs(x) * scale + 0.5) / scale
+}
+
+build_default_rounding_span <- function(value, rounding_unit, display_digits) {
+  increment <- 10 ^ (-display_digits)
+  lower_bound <- pmax(value - rounding_unit / 2, 0)
+  upper_bound <- value + rounding_unit / 2 - increment
+
+  list(
+    min = as.double(lower_bound),
+    max = as.double(upper_bound)
+  )
+}
+
 build_monthly_restriction_table <- function(profile_data) {
   monthly_reference <- profile_data %>%
     group_by(month) %>%
@@ -233,27 +249,29 @@ build_monthly_restriction_table <- function(profile_data) {
     left_join(monthly_reference, by = "month") %>%
     arrange(month) %>%
     mutate(
-      original_monthly_sum = as.double(original_monthly_sum),
-      min_heat_load_kw_sum = original_monthly_sum,
-      max_heat_load_kw_sum = original_monthly_sum
+      original_monthly_sum = round_half_up(as.double(original_monthly_sum), digits = -3),
+      monthly_span = map(original_monthly_sum, ~build_default_rounding_span(.x, rounding_unit = 1000, display_digits = 0)),
+      min_heat_load_kw_sum = map_dbl(monthly_span, "min"),
+      max_heat_load_kw_sum = map_dbl(monthly_span, "max")
     ) %>%
     select(month, month_label, original_monthly_sum, min_heat_load_kw_sum, max_heat_load_kw_sum)
 }
 
 build_daily_restriction_table <- function(profile_data, max_yearday = 10L) {
-  daily_reference <- profile_data %>%
+  profile_data %>%
     mutate(yearday = calculate_yearday(month, day)) %>%
     group_by(yearday) %>%
-    summarise(original_daily_average = mean(heat_load_kw, na.rm = TRUE), .groups = "drop")
-
-  tibble(yearday = seq_len(max_yearday)) %>%
-    left_join(daily_reference, by = "yearday") %>%
-    arrange(yearday) %>%
+    summarise(original_daily_average = mean(heat_load_kw, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(original_daily_average), yearday) %>%
+    slice_head(n = max_yearday) %>%
     mutate(
-      original_daily_average = as.double(original_daily_average),
-      min_heat_load_kw_daily_avg = original_daily_average,
-      max_heat_load_kw_daily_avg = original_daily_average
-    )
+      rank = row_number(),
+      original_daily_average = round_half_up(as.double(original_daily_average), digits = 0),
+      daily_span = map(original_daily_average, ~build_default_rounding_span(.x, rounding_unit = 1, display_digits = 1)),
+      min_heat_load_kw_daily_avg = map_dbl(daily_span, "min"),
+      max_heat_load_kw_daily_avg = map_dbl(daily_span, "max")
+    ) %>%
+    select(rank, yearday, original_daily_average, min_heat_load_kw_daily_avg, max_heat_load_kw_daily_avg)
 }
 
 apply_table_edit <- function(data, edit_info, display_columns, lower_col, upper_col, label) {
@@ -356,6 +374,7 @@ my_ui <- fluidPage(
   titlePanel("Temperature-corrected heating load"),
   sidebarLayout(
     sidebarPanel(
+      style = "max-height: calc(100vh - 140px); overflow-y: auto;",
       helpText("Required heating profile columns: month, weekday, day, time, hour, temperature, heat_load_kw"),
       fileInput(
         "profile_file",
@@ -378,13 +397,33 @@ my_ui <- fluidPage(
         max = 40,
         step = 0.5
       ),
-      selectInput(
-        "prediction_mode",
-        "Prediction mode",
-        choices = prediction_mode_choices,
-        selected = "standard"
+      wellPanel(
+        class = "prediction-settings-card",
+        style = "margin-bottom: 15px;",
+        tags$strong("Prediction settings"),
+        tabsetPanel(
+          id = "prediction_settings_tabset",
+          selected = "mode_tab",
+          tabPanel(
+            title = "Mode",
+            value = "mode_tab",
+            br(),
+            selectInput(
+              "prediction_mode",
+              "Prediction mode",
+              choices = prediction_mode_choices,
+              selected = "standard"
+            ),
+            helpText("Strict mode adds editable monthly and daily restrictions in the Strict restrictions tab.")
+          ),
+          tabPanel(
+            title = "Strict restrictions",
+            value = "strict_tab",
+            br(),
+            uiOutput("strict_mode_ui")
+          )
+        )
       ),
-      uiOutput("strict_mode_ui"),
       sliderInput(
         "pointsize",
         "Adjust the size of the points in the graphs",
@@ -439,10 +478,20 @@ my_server <- function(input, output, session) {
     )
   })
 
-  observeEvent(strict_reference_tables(), {
-    monthly_restrictions(strict_reference_tables()$monthly)
-    daily_restrictions(strict_reference_tables()$daily)
+  observeEvent(input$profile_file, {
+    monthly_restrictions(NULL)
+    daily_restrictions(NULL)
   }, ignoreInit = TRUE)
+
+  observeEvent(strict_reference_tables(), {
+    reference_tables <- strict_reference_tables()
+    monthly_restrictions(reference_tables$monthly)
+    daily_restrictions(reference_tables$daily)
+  })
+
+  strict_profile_ready <- reactive({
+    !is.null(monthly_restrictions()) && !is.null(daily_restrictions())
+  })
 
   bundle_status_message <- function() {
     if (!is.null(calculation_error())) {
@@ -463,6 +512,16 @@ my_server <- function(input, output, session) {
 
     NULL
   }
+
+  observeEvent(input$prediction_mode, {
+    selected_tab <- if (identical(input$prediction_mode, "strict")) {
+      "strict_tab"
+    } else {
+      "mode_tab"
+    }
+
+    updateTabsetPanel(session, "prediction_settings_tabset", selected = selected_tab)
+  }, ignoreInit = FALSE)
 
   observeEvent(input$run_model, {
     req(input$profile_file)
@@ -580,34 +639,27 @@ my_server <- function(input, output, session) {
 
   output$strict_mode_ui <- renderUI({
     if (input$prediction_mode != "strict") {
-      return(NULL)
+      return(helpText("Select strict prediction mode in the Mode tab to enable the restriction tables."))
     }
 
-    if (is.null(input$profile_file)) {
-      return(helpText("Upload a heating profile to configure strict-mode monthly sums and year-day 1-10 daily averages."))
+    if (!strict_profile_ready()) {
+      return(helpText("Upload a valid heating profile to configure strict-mode monthly sums and year-day 1-10 daily averages."))
     }
 
     tagList(
       helpText("Strict mode runs the standard prediction first and then adjusts the predicted results to fit the configured monthly and daily spans."),
-      fluidRow(
-        column(
-          width = 6,
-          tags$strong("Monthly sums"),
-          DTOutput("strict_monthly_table")
-        ),
-        column(
-          width = 6,
-          tags$strong("Daily averages (year days 1-10)"),
-          DTOutput("strict_daily_table")
-        )
-      )
+      tags$strong("Monthly sums"),
+      tags$div(style = "overflow-x: auto; margin-top: 8px;", DTOutput("strict_monthly_table")),
+      tags$div(style = "height: 12px;"),
+      tags$strong("Highest daily averages (top 10 year-days)"),
+      tags$div(style = "overflow-x: auto; margin-top: 8px;", DTOutput("strict_daily_table"))
     )
   })
 
   output$strict_monthly_table <- renderDT({
     req(input$prediction_mode == "strict")
     table_data <- monthly_restrictions()
-    validate(need(!is.null(table_data), "Upload a heating profile to configure monthly restrictions."))
+    validate(need(strict_profile_ready() && !is.null(table_data), "Upload a valid heating profile to configure monthly restrictions."))
 
     datatable(
       table_data %>%
@@ -630,18 +682,18 @@ my_server <- function(input, output, session) {
       ),
       class = "compact stripe"
     ) %>%
-      formatRound(columns = c("Original sum", "Min sum", "Max sum"), digits = 2)
+      formatRound(columns = c("Original sum", "Min sum", "Max sum"), digits = 0)
   }, server = FALSE)
 
   output$strict_daily_table <- renderDT({
     req(input$prediction_mode == "strict")
     table_data <- daily_restrictions()
-    validate(need(!is.null(table_data), "Upload a heating profile to configure daily restrictions."))
+    validate(need(strict_profile_ready() && !is.null(table_data), "Upload a valid heating profile to configure daily restrictions."))
 
     datatable(
       table_data %>%
         transmute(
-          `Year day` = yearday,
+          Rank = rank,
           `Original daily average` = original_daily_average,
           `Min daily average` = min_heat_load_kw_daily_avg,
           `Max daily average` = max_heat_load_kw_daily_avg
@@ -659,7 +711,7 @@ my_server <- function(input, output, session) {
       ),
       class = "compact stripe"
     ) %>%
-      formatRound(columns = c("Original daily average", "Min daily average", "Max daily average"), digits = 2)
+      formatRound(columns = c("Original daily average", "Min daily average", "Max daily average"), digits = 1)
   }, server = FALSE)
 
   observeEvent(input$strict_monthly_table_cell_edit, {

@@ -26,7 +26,12 @@ calculate_yearday <- function(month, day, year = NULL, reference_year = 2021) {
 }
 
 validate_strict_restriction_table <- function(data, key_col, lower_col, upper_col, label) {
-  assert_required_columns(data, c(key_col, lower_col, upper_col), label)
+  required_cols <- c(key_col, lower_col, upper_col)
+  missing_cols <- setdiff(required_cols, names(data))
+
+  if (length(missing_cols) > 0) {
+    stop(paste0(label, " is missing required columns: ", paste(missing_cols, collapse = ", ")), call. = FALSE)
+  }
 
   if (any(!is.finite(data[[lower_col]]) | !is.finite(data[[upper_col]]))) {
     stop(paste0(label, " contains missing or invalid lower/upper bounds."), call. = FALSE)
